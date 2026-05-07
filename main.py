@@ -12,7 +12,7 @@ Endpoints:
   GET  /errors              ← ver últimos errores
 """
 
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, Query
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
@@ -54,9 +54,10 @@ class ErrorReport(BaseModel):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def check_api_key(x_api_key: Optional[str]):
-    if x_api_key != API_KEY:
-        raise HTTPException(status_code=401, detail="API key inválida")
+def check_api_key(header_key: Optional[str], query_key: Optional[str] = None):
+    if header_key == API_KEY or query_key == API_KEY:
+        return
+    raise HTTPException(status_code=401, detail="API key inválida")
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -74,9 +75,10 @@ def health():
 def receive_signal(
     batch: SignalBatch,
     x_api_key: Optional[str] = Header(default=None),
+    api_key:   Optional[str] = Query(default=None),
 ):
     """TradingView envía la señal aquí vía webhook."""
-    check_api_key(x_api_key)
+    check_api_key(x_api_key, api_key)
 
     if batch.timestamp is None:
         batch.timestamp = datetime.utcnow().isoformat()
@@ -91,12 +93,13 @@ def get_signal(
     symbol: str,
     session_id: Optional[str] = None,
     x_api_key: Optional[str] = Header(default=None),
+    api_key:   Optional[str] = Query(default=None),
 ):
     """
     MT5 EA consulta aquí cada 2 segundos.
     Si pasa session_id y ya lo procesó, responde 'no_new'.
     """
-    check_api_key(x_api_key)
+    check_api_key(x_api_key, api_key)
 
     sym = symbol.upper()
     batch = signals_store.get(sym)
@@ -114,9 +117,10 @@ def get_signal(
 def report_error(
     report: ErrorReport,
     x_api_key: Optional[str] = Header(default=None),
+    api_key:   Optional[str] = Query(default=None),
 ):
     """MT5 EA reporta un error al intentar colocar una orden."""
-    check_api_key(x_api_key)
+    check_api_key(x_api_key, api_key)
 
     if report.timestamp is None:
         report.timestamp = datetime.utcnow().isoformat()
@@ -130,7 +134,10 @@ def report_error(
 
 
 @app.get("/errors")
-def get_errors(x_api_key: Optional[str] = Header(default=None)):
+def get_errors(
+    x_api_key: Optional[str] = Header(default=None),
+    api_key:   Optional[str] = Query(default=None),
+):
     """Ver los últimos errores reportados por el EA."""
-    check_api_key(x_api_key)
+    check_api_key(x_api_key, api_key)
     return errors_store[-50:]
