@@ -6,13 +6,13 @@ El EA de MT5 consulta cada 2 segundos para obtener señales nuevas.
 
 Endpoints:
   GET  /health              ← verificar que está online
-  POST /webhook             ← TradingView envía la señal
+  POST /webhook             ← TradingView envía la señal (órdenes y comandos de sesión)
   GET  /signals/{symbol}    ← MT5 EA consulta (con ?session_id=)
   POST /errors              ← MT5 EA reporta errores
   GET  /errors              ← ver últimos errores
 """
 
-from fastapi import FastAPI, HTTPException, Header, Query
+from fastapi import FastAPI, HTTPException, Header, Query, Request
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
@@ -23,11 +23,11 @@ app = FastAPI(title="TradingView-MT5 Pivot Bridge")
 API_KEY = os.environ.get("API_KEY", "changeme")
 
 # Almacenamiento en memoria (Railway mantiene el proceso vivo)
-signals_store: dict = {}   # symbol -> última SignalBatch
+signals_store: dict = {}   # symbol -> último mensaje recibido
 errors_store: list  = []   # últimos errores del EA
 
 
-# ── Modelos ──────────────────────────────────────────────────────────────────
+# ── Modelos ───────────────────────────────────────────────────────────────────
 
 class Order(BaseModel):
     type: str          # "BUY_STOP" | "SELL_STOP"
@@ -38,18 +38,22 @@ class Order(BaseModel):
 class SignalBatch(BaseModel):
     symbol: str
     session_id: str
-    reference_pivot: str
-    risk_mode: str     # "USD" | "PCT"
-    risk_value: float
-    orders: List[Order]
-    timestamp: Optional[str] = None
+    # Campos opcionales — algunos mensajes son solo comandos de sesión
+    action:          Optional[str]        = None   # "CANCEL_PENDING" | "CLOSE_ALL"
+    reference_pivot: Optional[str]        = None
+    risk_mode:       Optional[str]        = None   # "USD" | "PCT"
+    risk_value:      Optional[float]      = None
+    orders:          Optional[List[Order]] = None
+    cutoff_hhmm:     Optional[str]        = None
+    close_hhmm:      Optional[str]        = None
+    timestamp:       Optional[str]        = None
 
 class ErrorReport(BaseModel):
     symbol: str
     error_code: int
     error_message: str
     order_type: Optional[str] = None
-    timestamp: Optional[str] = None
+    timestamp:  Optional[str] = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -77,31 +81,43 @@ def receive_signal(
     x_api_key: Optional[str] = Header(default=None),
     api_key:   Optional[str] = Query(default=None),
 ):
-    """TradingView envía la señal aquí vía webhook."""
+    """
+    TradingView envía la señal aquí vía webhook.
+    Acepta dos tipos de mensaje:
+      1. Señal de órdenes (con orders[])
+      2. Comando de sesión (action = CANCEL_PENDING | CLOSE_ALL)
+    """
     check_api_key(x_api_key, api_key)
 
     if batch.timestamp is None:
         batch.timestamp = datetime.utcnow().isoformat()
 
-    signals_store[batch.symbol.upper()] = batch
-    print(f"[{batch.timestamp}] ▸ Señal recibida: {batch.symbol} | pivote: {batch.reference_pivot} | {len(batch.orders)} órdenes")
-    return {"ok": True, "symbol": batch.symbol, "session_id": batch.session_id}
+    sym = batch.symbol.upper()
+    signals_store[sym] = batch
+
+    if batch.action:
+        print(f"[{batch.timestamp}] ⚡ Comando: {batch.action} | {sym}")
+    else:
+        n_orders = len(batch.orders) if batch.orders else 0
+        print(f"[{batch.timestamp}] ▸ Señal: {sym} | pivote: {batch.reference_pivot} | {n_orders} órdenes")
+
+    return {"ok": True, "symbol": sym, "session_id": batch.session_id}
 
 
 @app.get("/signals/{symbol}")
 def get_signal(
     symbol: str,
     session_id: Optional[str] = None,
-    x_api_key: Optional[str] = Header(default=None),
-    api_key:   Optional[str] = Query(default=None),
+    x_api_key:  Optional[str] = Header(default=None),
+    api_key:    Optional[str] = Query(default=None),
 ):
     """
     MT5 EA consulta aquí cada 2 segundos.
-    Si pasa session_id y ya lo procesó, responde 'no_new'.
+    Si pasa session_id igual al almacenado, responde new_signal=false.
     """
     check_api_key(x_api_key, api_key)
 
-    sym = symbol.upper()
+    sym   = symbol.upper()
     batch = signals_store.get(sym)
 
     if batch is None:
